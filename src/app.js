@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { ApiError } from "./utils/ApiError.js";
 import eventRouter from "./routes/event.routes.js";
+import analyticsRouter from "./routes/analytics.routes.js";
 
 const app = express();
 
@@ -18,6 +19,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/events", eventRouter);
+app.use("/api/analytics", analyticsRouter);
 
 // 404 handler
 app.use((req, res, next) => {

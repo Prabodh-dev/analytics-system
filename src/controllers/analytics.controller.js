@@ -198,3 +198,79 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, response, "Dashboard summary"));
 });
+
+/**
+ * GET /api/analytics/retention?days=7
+ * New = first eventTime is within range
+ * Returning = first eventTime is before range AND has at least one event within range
+ */
+export const retention = asyncHandler(async (req, res) => {
+  const days = Number(req.query.days || 7);
+
+  const start = new Date();
+  start.setDate(start.getDate() - (days - 1));
+  start.setHours(0, 0, 0, 0);
+
+  const result = await Event.aggregate([
+    // Create a visitorId (userId else anonymousId)
+    {
+      $project: {
+        visitorId: { $ifNull: ["$userId", "$anonymousId"] },
+        eventTime: 1,
+      },
+    },
+    { $match: { visitorId: { $ne: null } } },
+
+    // Group by visitor to find their first ever visit time and whether they visited in range
+    {
+      $group: {
+        _id: "$visitorId",
+        firstSeen: { $min: "$eventTime" },
+        hasVisitInRange: {
+          $max: {
+            $cond: [{ $gte: ["$eventTime", start] }, 1, 0],
+          },
+        },
+      },
+    },
+
+    // Only consider visitors who visited in range (otherwise irrelevant)
+    { $match: { hasVisitInRange: 1 } },
+
+    // Classify into new vs returning
+    {
+      $project: {
+        isNew: { $cond: [{ $gte: ["$firstSeen", start] }, 1, 0] },
+      },
+    },
+
+    {
+      $group: {
+        _id: "$isNew",
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  let newVisitors = 0;
+  let returningVisitors = 0;
+
+  for (const row of result) {
+    if (row._id === 1) newVisitors = row.count;
+    if (row._id === 0) returningVisitors = row.count;
+  }
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        days,
+        start,
+        newVisitors,
+        returningVisitors,
+        totalUniqueVisitors: newVisitors + returningVisitors,
+      },
+      "Retention analytics"
+    )
+  );
+});

@@ -274,3 +274,68 @@ export const retention = asyncHandler(async (req, res) => {
     )
   );
 });
+
+export const activeUsers = asyncHandler(async (req, res) => {
+  const now = new Date();
+
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const start7 = new Date(now);
+  start7.setDate(start7.getDate() - 6);
+  start7.setHours(0, 0, 0, 0);
+
+  const start30 = new Date(now);
+  start30.setDate(start30.getDate() - 29);
+  start30.setHours(0, 0, 0, 0);
+
+  const [result] = await Event.aggregate([
+    {
+      $project: {
+        visitorId: { $ifNull: ["$userId", "$anonymousId"] },
+        eventTime: 1,
+      },
+    },
+    { $match: { visitorId: { $ne: null } } },
+    {
+      $facet: {
+        DAU: [
+          { $match: { eventTime: { $gte: startOfToday } } },
+          { $group: { _id: "$visitorId" } },
+          { $count: "count" },
+        ],
+        WAU: [
+          { $match: { eventTime: { $gte: start7 } } },
+          { $group: { _id: "$visitorId" } },
+          { $count: "count" },
+        ],
+        MAU: [
+          { $match: { eventTime: { $gte: start30 } } },
+          { $group: { _id: "$visitorId" } },
+          { $count: "count" },
+        ],
+      },
+    },
+  ]);
+
+  const dau = result?.DAU?.[0]?.count || 0;
+  const wau = result?.WAU?.[0]?.count || 0;
+  const mau = result?.MAU?.[0]?.count || 0;
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        DAU: dau,
+        WAU: wau,
+        MAU: mau,
+        windows: {
+          todayStart: startOfToday,
+          weekStart: start7,
+          monthStart: start30,
+        },
+      },
+      "Active users metrics"
+    )
+  );
+});

@@ -2,7 +2,11 @@
 import { Event } from "../models/event.model.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { redisClient } from "../config/redis.js";
 
+/**
+ * GET /api/analytics/events-per-day?days=7&eventName=page_view
+ */
 export const eventsPerDay = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
   const eventName = req.query.eventName;
@@ -25,13 +29,7 @@ export const eventsPerDay = asyncHandler(async (req, res) => {
       },
     },
     { $sort: { "_id.day": 1 } },
-    {
-      $project: {
-        _id: 0,
-        day: "$_id.day",
-        count: 1,
-      },
-    },
+    { $project: { _id: 0, day: "$_id.day", count: 1 } },
   ]);
 
   return res
@@ -45,6 +43,9 @@ export const eventsPerDay = asyncHandler(async (req, res) => {
     );
 });
 
+/**
+ * GET /api/analytics/top-pages?days=7&limit=10
+ */
 export const topPages = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
   const limit = Number(req.query.limit || 10);
@@ -61,21 +62,10 @@ export const topPages = asyncHandler(async (req, res) => {
         url: { $ne: null },
       },
     },
-    {
-      $group: {
-        _id: "$url",
-        views: { $sum: 1 },
-      },
-    },
+    { $group: { _id: "$url", views: { $sum: 1 } } },
     { $sort: { views: -1 } },
     { $limit: limit },
-    {
-      $project: {
-        _id: 0,
-        url: "$_id",
-        views: 1,
-      },
-    },
+    { $project: { _id: 0, url: "$_id", views: 1 } },
   ]);
 
   return res
@@ -83,6 +73,9 @@ export const topPages = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, { days, limit, data }, "Top pages"));
 });
 
+/**
+ * GET /api/analytics/unique-visitors?days=7
+ */
 export const uniqueVisitors = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
 
@@ -92,13 +85,7 @@ export const uniqueVisitors = asyncHandler(async (req, res) => {
 
   const data = await Event.aggregate([
     { $match: { eventTime: { $gte: start } } },
-    {
-      $project: {
-        visitorId: {
-          $ifNull: ["$userId", "$anonymousId"],
-        },
-      },
-    },
+    { $project: { visitorId: { $ifNull: ["$userId", "$anonymousId"] } } },
     { $match: { visitorId: { $ne: null } } },
     { $group: { _id: "$visitorId" } },
     { $count: "uniqueVisitors" },
@@ -113,10 +100,27 @@ export const uniqueVisitors = asyncHandler(async (req, res) => {
     );
 });
 
+/**
+ * GET /api/analytics/summary?days=7&top=10
+ * Redis cached (TTL 60s)
+ */
 export const dashboardSummary = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
   const top = Number(req.query.top || 10);
 
+  const cacheKey = `dashboard:summary:${days}:${top}`;
+
+  // 1) Cache hit
+  const cached = await redisClient.get(cacheKey);
+  if (cached) {
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, JSON.parse(cached), "Dashboard summary (cached)")
+      );
+  }
+
+  // 2) Cache miss -> compute
   const start = new Date();
   start.setDate(start.getDate() - (days - 1));
   start.setHours(0, 0, 0, 0);
@@ -125,10 +129,8 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
     { $match: { eventTime: { $gte: start } } },
     {
       $facet: {
-        // 1) Total events
         totalEvents: [{ $count: "count" }],
 
-        // 2) Events per day (page_view)
         pageViewsPerDay: [
           { $match: { eventName: "page_view" } },
           {
@@ -145,7 +147,6 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
           { $project: { _id: 0, day: "$_id.day", count: 1 } },
         ],
 
-        // 3) Top pages
         topPages: [
           { $match: { eventName: "page_view", url: { $ne: null } } },
           { $group: { _id: "$url", views: { $sum: 1 } } },
@@ -154,13 +155,8 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
           { $project: { _id: 0, url: "$_id", views: 1 } },
         ],
 
-        // 4) Unique visitors (userId else anonymousId)
         uniqueVisitors: [
-          {
-            $project: {
-              visitorId: { $ifNull: ["$userId", "$anonymousId"] },
-            },
-          },
+          { $project: { visitorId: { $ifNull: ["$userId", "$anonymousId"] } } },
           { $match: { visitorId: { $ne: null } } },
           { $group: { _id: "$visitorId" } },
           { $count: "count" },
@@ -179,11 +175,18 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
     topPages: summary.topPages || [],
   };
 
+  // 3) Save cache (TTL 60s)
+  await redisClient.setEx(cacheKey, 60, JSON.stringify(response));
+
   return res
     .status(200)
     .json(new ApiResponse(200, response, "Dashboard summary"));
 });
 
+/**
+ * GET /api/analytics/retention?days=7
+ * New vs Returning visitors
+ */
 export const retention = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
 
@@ -192,7 +195,6 @@ export const retention = asyncHandler(async (req, res) => {
   start.setHours(0, 0, 0, 0);
 
   const result = await Event.aggregate([
-    // Create a visitorId (userId else anonymousId)
     {
       $project: {
         visitorId: { $ifNull: ["$userId", "$anonymousId"] },
@@ -200,36 +202,18 @@ export const retention = asyncHandler(async (req, res) => {
       },
     },
     { $match: { visitorId: { $ne: null } } },
-
-    // Group by visitor to find their first ever visit time and whether they visited in range
     {
       $group: {
         _id: "$visitorId",
         firstSeen: { $min: "$eventTime" },
         hasVisitInRange: {
-          $max: {
-            $cond: [{ $gte: ["$eventTime", start] }, 1, 0],
-          },
+          $max: { $cond: [{ $gte: ["$eventTime", start] }, 1, 0] },
         },
       },
     },
-
-    // Only consider visitors who visited in range
     { $match: { hasVisitInRange: 1 } },
-
-    // Classify into new vs returning
-    {
-      $project: {
-        isNew: { $cond: [{ $gte: ["$firstSeen", start] }, 1, 0] },
-      },
-    },
-
-    {
-      $group: {
-        _id: "$isNew",
-        count: { $sum: 1 },
-      },
-    },
+    { $project: { isNew: { $cond: [{ $gte: ["$firstSeen", start] }, 1, 0] } } },
+    { $group: { _id: "$isNew", count: { $sum: 1 } } },
   ]);
 
   let newVisitors = 0;
@@ -255,6 +239,10 @@ export const retention = asyncHandler(async (req, res) => {
   );
 });
 
+/**
+ * GET /api/analytics/active-users
+ * DAU/WAU/MAU
+ */
 export const activeUsers = asyncHandler(async (req, res) => {
   const now = new Date();
 

@@ -3,12 +3,9 @@ import { Event } from "../models/event.model.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 
-/**
- * GET /api/analytics/events-per-day?days=7&eventName=page_view
- */
 export const eventsPerDay = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
-  const eventName = req.query.eventName; // optional
+  const eventName = req.query.eventName;
 
   const start = new Date();
   start.setDate(start.getDate() - (days - 1));
@@ -48,9 +45,6 @@ export const eventsPerDay = asyncHandler(async (req, res) => {
     );
 });
 
-/**
- * GET /api/analytics/top-pages?days=7&limit=10
- */
 export const topPages = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
   const limit = Number(req.query.limit || 10);
@@ -89,12 +83,6 @@ export const topPages = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, { days, limit, data }, "Top pages"));
 });
 
-/**
- * GET /api/analytics/unique-visitors?days=7
- * Counts unique visitors using:
- * - userId if present
- * - else anonymousId
- */
 export const uniqueVisitors = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
 
@@ -107,7 +95,7 @@ export const uniqueVisitors = asyncHandler(async (req, res) => {
     {
       $project: {
         visitorId: {
-          $ifNull: ["$userId", "$anonymousId"], // choose userId else anonymousId
+          $ifNull: ["$userId", "$anonymousId"],
         },
       },
     },
@@ -125,9 +113,6 @@ export const uniqueVisitors = asyncHandler(async (req, res) => {
     );
 });
 
-/**
- * GET /api/analytics/summary?days=7&top=10
- */
 export const dashboardSummary = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
   const top = Number(req.query.top || 10);
@@ -199,11 +184,6 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, response, "Dashboard summary"));
 });
 
-/**
- * GET /api/analytics/retention?days=7
- * New = first eventTime is within range
- * Returning = first eventTime is before range AND has at least one event within range
- */
 export const retention = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
 
@@ -234,7 +214,7 @@ export const retention = asyncHandler(async (req, res) => {
       },
     },
 
-    // Only consider visitors who visited in range (otherwise irrelevant)
+    // Only consider visitors who visited in range
     { $match: { hasVisitInRange: 1 } },
 
     // Classify into new vs returning

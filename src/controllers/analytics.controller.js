@@ -3,6 +3,7 @@ import { Event } from "../models/event.model.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { redisClient } from "../config/redis.js";
+import { analyticsQueue } from "../queue/analytics.queue.js";
 
 /**
  * GET /api/analytics/events-per-day?days=7&eventName=page_view
@@ -102,7 +103,7 @@ export const uniqueVisitors = asyncHandler(async (req, res) => {
 
 /**
  * GET /api/analytics/summary?days=7&top=10
- * Redis cached (TTL 60s)
+ * Redis cached + Queue based recompute
  */
 export const dashboardSummary = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
@@ -110,7 +111,7 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
 
   const cacheKey = `dashboard:summary:${days}:${top}`;
 
-  // 1) Cache hit
+  // 1️⃣ Cache hit → instant response
   const cached = await redisClient.get(cacheKey);
   if (cached) {
     return res
@@ -120,72 +121,25 @@ export const dashboardSummary = asyncHandler(async (req, res) => {
       );
   }
 
-  // 2) Cache miss -> compute
-  const start = new Date();
-  start.setDate(start.getDate() - (days - 1));
-  start.setHours(0, 0, 0, 0);
-
-  const result = await Event.aggregate([
-    { $match: { eventTime: { $gte: start } } },
-    {
-      $facet: {
-        totalEvents: [{ $count: "count" }],
-
-        pageViewsPerDay: [
-          { $match: { eventName: "page_view" } },
-          {
-            $group: {
-              _id: {
-                day: {
-                  $dateToString: { format: "%Y-%m-%d", date: "$eventTime" },
-                },
-              },
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { "_id.day": 1 } },
-          { $project: { _id: 0, day: "$_id.day", count: 1 } },
-        ],
-
-        topPages: [
-          { $match: { eventName: "page_view", url: { $ne: null } } },
-          { $group: { _id: "$url", views: { $sum: 1 } } },
-          { $sort: { views: -1 } },
-          { $limit: top },
-          { $project: { _id: 0, url: "$_id", views: 1 } },
-        ],
-
-        uniqueVisitors: [
-          { $project: { visitorId: { $ifNull: ["$userId", "$anonymousId"] } } },
-          { $match: { visitorId: { $ne: null } } },
-          { $group: { _id: "$visitorId" } },
-          { $count: "count" },
-        ],
-      },
-    },
-  ]);
-
-  const summary = result[0] || {};
-
-  const response = {
-    range: { days, start },
-    totalEvents: summary.totalEvents?.[0]?.count || 0,
-    uniqueVisitors: summary.uniqueVisitors?.[0]?.count || 0,
-    pageViewsPerDay: summary.pageViewsPerDay || [],
-    topPages: summary.topPages || [],
-  };
-
-  // 3) Save cache (TTL 60s)
-  await redisClient.setEx(cacheKey, 60, JSON.stringify(response));
+  // 2️⃣ Cache miss → push job to queue
+  await analyticsQueue.add("recompute-summary", {
+    days,
+    top,
+  });
 
   return res
-    .status(200)
-    .json(new ApiResponse(200, response, "Dashboard summary"));
+    .status(202)
+    .json(
+      new ApiResponse(
+        202,
+        null,
+        "Summary is being prepared, please retry shortly"
+      )
+    );
 });
 
 /**
  * GET /api/analytics/retention?days=7
- * New vs Returning visitors
  */
 export const retention = asyncHandler(async (req, res) => {
   const days = Number(req.query.days || 7);
@@ -241,7 +195,7 @@ export const retention = asyncHandler(async (req, res) => {
 
 /**
  * GET /api/analytics/active-users
- * DAU/WAU/MAU
+ * DAU / WAU / MAU
  */
 export const activeUsers = asyncHandler(async (req, res) => {
   const now = new Date();
@@ -286,17 +240,13 @@ export const activeUsers = asyncHandler(async (req, res) => {
     },
   ]);
 
-  const dau = result?.DAU?.[0]?.count || 0;
-  const wau = result?.WAU?.[0]?.count || 0;
-  const mau = result?.MAU?.[0]?.count || 0;
-
   return res.status(200).json(
     new ApiResponse(
       200,
       {
-        DAU: dau,
-        WAU: wau,
-        MAU: mau,
+        DAU: result?.DAU?.[0]?.count || 0,
+        WAU: result?.WAU?.[0]?.count || 0,
+        MAU: result?.MAU?.[0]?.count || 0,
         windows: {
           todayStart: startOfToday,
           weekStart: start7,
